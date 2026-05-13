@@ -32,8 +32,43 @@ raspividyuv -3d sbs -fps 3 -3dswap -rot 180 -md 4 -t 0 -w $(( 1296 * 2 )) -h 972
 ```
 `a.out` is the compiled processing binary that consumes the raw YUV pipe.
 
+## Depth Reconstruction Pipeline
+
+Five scripts run in order:
+
+| Script | Purpose | Runtime |
+|--------|---------|---------|
+| `01_extract_frames.py` | Split SBS video → `frames/chess/` and `frames/scene/` | ~1 min |
+| `02_calibrate.py` | Stereo calibration from chessboard frames | ~2 min |
+| `03_classical_depth.py` | SGBM disparity → metric depth maps | ~3 min |
+| `04_neural_depth.py` | MiDaS monocular depth (every 5th frame on CPU) | ~8 min |
+| `05_compare.py` | Side-by-side collages: original / SGBM / MiDaS | ~1 min |
+
+```powershell
+pip install -r requirements.txt
+python 01_extract_frames.py
+python 02_calibrate.py
+python 03_classical_depth.py
+python 04_neural_depth.py
+python 05_compare.py
+```
+
+### Calibration results (`calibration/stereo_calib.npz`)
+- Reprojection error: **0.38 px** (excellent)
+- Focal length: **792 px**
+- Baseline measured: **0.1708 m** (matches hardware 0.17 m)
+- Board: 9×6 inner corners, 35 mm squares, 50 frames used
+
+### Known constraints
+- Python 3.14 has no CUDA PyTorch build → MiDaS runs on CPU with `MiDaS_small`
+- With a Python 3.11/3.12 + CUDA environment, change `MODEL_TYPE = "DPT_Large"` in `04_neural_depth.py` for higher quality
+
 ## Directory Contents
 
-- `chess/` — stereo video recordings of the chessboard calibration target
-- `strereo/` — stereo video recordings of the scene
+- `chess/` — stereo SBS calibration videos (chessboard)
+- `strereo/` — stereo SBS scene video for depth reconstruction
+- `calibration/` — saved calibration data (`stereo_calib.npz`)
+- `results/classical/` — SGBM depth maps (metric, COLORMAP_JET)
+- `results/neural/` — MiDaS depth maps (relative, COLORMAP_MAGMA)
+- `results/comparison/` — side-by-side collages
 - `Lecture_7_3D(1).pptx` — course lecture slides on 3D vision
