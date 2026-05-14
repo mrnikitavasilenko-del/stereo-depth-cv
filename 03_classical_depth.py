@@ -19,6 +19,9 @@ OUT_DIR    = Path("results/classical")
 
 BASELINE = 0.17  # metres
 
+# Temporal smoothing
+EMA_ALPHA = 0.4   # weight of current frame (0=fully smoothed, 1=no smoothing)
+
 # SGBM parameters
 NUM_DISPARITIES = 128   # must be divisible by 16
 BLOCK_SIZE      = 7     # smaller = more detail, noisier
@@ -114,6 +117,34 @@ def main():
         np.save(str(OUT_DIR / f"{stem}_depth_raw.npy"), depth)
 
     print(f"Done. Saved to: {OUT_DIR.resolve()}")
+    temporal_smooth()
+
+
+def temporal_smooth():
+    """Second pass: EMA over consecutive depth maps to reduce frame-to-frame jumps."""
+    raw_files = sorted(OUT_DIR.glob("*_depth_raw.npy"))
+    if not raw_files:
+        return
+
+    print(f"\nTemporal smoothing (EMA alpha={EMA_ALPHA}) over {len(raw_files)} frames...")
+    prev = None
+    for path in raw_files:
+        depth = np.load(str(path))
+        if prev is None:
+            smoothed = depth
+        else:
+            # Blend: only where both frames have valid depth
+            valid = (depth > 0) & (prev > 0)
+            smoothed = np.where(valid,
+                                EMA_ALPHA * depth + (1 - EMA_ALPHA) * prev,
+                                depth)
+        prev = smoothed
+
+        # Overwrite colourised PNG with smoothed version
+        color_path = str(path).replace("_depth_raw.npy", "_depth.png")
+        cv2.imwrite(color_path, depth_colormap(smoothed))
+
+    print("Temporal smoothing done.")
 
 
 if __name__ == "__main__":
