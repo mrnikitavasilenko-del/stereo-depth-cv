@@ -40,7 +40,7 @@ Five scripts run in order:
 |--------|---------|---------|
 | `01_extract_frames.py` | Split SBS video → `frames/chess/` and `frames/scene/` | ~1 min |
 | `02_calibrate.py` | Stereo calibration from chessboard frames | ~2 min |
-| `03_classical_depth.py` | SGBM disparity → metric depth maps | ~3 min |
+| `03_classical_depth.py` | SGBM + WLS filter disparity → metric depth maps | ~5 min |
 | `04_neural_depth.py` | MiDaS monocular depth (every 5th frame on CPU) | ~8 min |
 | `05_compare.py` | Side-by-side collages: original / SGBM / MiDaS | ~1 min |
 
@@ -58,6 +58,12 @@ python 05_compare.py
 - Focal length: **792 px**
 - Baseline measured: **0.1708 m** (matches hardware 0.17 m)
 - Board: 9×6 inner corners, 35 mm squares, 50 frames used
+
+### Classical depth improvements (v2)
+`03_classical_depth.py` uses CLAHE pre-processing + WLS filter (Weighted Least Squares):
+- Computes left→right and right→left disparities, cross-checks them
+- Edge-aware smoothing via WLS (λ=8000, σ=1.5) fills holes and reduces noise
+- Tune `WLS_LAMBDA` (smoothness) and `WLS_SIGMA` (edge sharpness) in the script
 
 ### Known constraints
 - Python 3.14 has no CUDA PyTorch build → MiDaS runs on CPU with `MiDaS_small`
