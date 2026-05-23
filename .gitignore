@@ -1,5 +1,23 @@
+# Сгенерированные данные (кадры и результаты воссоздаются запуском скриптов)
 frames/
 results/
 debug/
-__pycache__/
+
+# Видеофайлы
 *.mp4
+*.mov
+*.avi
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Временные файлы
+*.tmp
+.DS_Store

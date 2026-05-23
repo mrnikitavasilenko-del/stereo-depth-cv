@@ -10,7 +10,12 @@ Model selection:
 import cv2
 import numpy as np
 import torch
+import torch.hub
 from pathlib import Path
+
+# Auto-trust all hub repos to avoid interactive prompts
+_orig_check = torch.hub._check_repo_is_trusted
+torch.hub._check_repo_is_trusted = lambda *a, **kw: None
 
 LEFT_DIR = Path("frames/scene/left")
 OUT_DIR  = Path("results/neural")

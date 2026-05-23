@@ -1,12 +1,15 @@
 """
-Compute disparity maps with StereoSGBM + WLS filter, convert to metric depth.
-Reads calibration from calibration/stereo_calib.npz
-Saves colourised depth maps to results/classical/
+Шаг 3: Классическая карта глубины через SGBM + WLS-фильтр.
+Читает калибровку из calibration/stereo_calib.npz
+Сохраняет карты глубины в results/classical/
 
-Improvements over plain SGBM:
-  - CLAHE pre-processing on rectified images
-  - Right matcher for left-right consistency check
-  - WLS (Weighted Least Squares) filter: edge-aware smoothing + hole filling
+Пайплайн:
+  1. Ректификация — устраняем дисторсию и выравниваем строки левого/правого кадра
+  2. CLAHE — усиливаем контраст перед поиском диспаритета
+  3. SGBM — ищем диспаритет (смещение пикселей между левым и правым кадром)
+  4. WLS-фильтр — сглаживаем диспаритет с учётом краёв, заполняем дыры
+  5. Глубина: Z = f * B / d  (фокус * база / диспаритет)
+  6. EMA — временное сглаживание между соседними кадрами
 """
 import cv2
 import numpy as np
@@ -17,30 +20,36 @@ LEFT_DIR   = Path("frames/scene/left")
 RIGHT_DIR  = Path("frames/scene/right")
 OUT_DIR    = Path("results/classical")
 
-BASELINE = 0.17  # metres
+BASELINE = 0.17  # расстояние между камерами в метрах (17 см)
 
-# Temporal smoothing
-EMA_ALPHA = 0.4   # weight of current frame (0=fully smoothed, 1=no smoothing)
+# Экспоненциальное скользящее среднее: 0 = полное сглаживание, 1 = без сглаживания
+EMA_ALPHA = 0.4
 
-# SGBM parameters
-NUM_DISPARITIES = 128   # must be divisible by 16
-BLOCK_SIZE      = 7     # smaller = more detail, noisier
-P1 = 8  * 3 * BLOCK_SIZE ** 2
-P2 = 32 * 3 * BLOCK_SIZE ** 2
+# Параметры SGBM — чем больше NUM_DISPARITIES, тем дальше видит (но медленнее)
+NUM_DISPARITIES = 128   # должно делиться на 16
+BLOCK_SIZE      = 7     # меньше = больше деталей, больше шума
+P1 = 8  * 3 * BLOCK_SIZE ** 2   # штраф за малое изменение диспаритета
+P2 = 32 * 3 * BLOCK_SIZE ** 2   # штраф за большое изменение диспаритета
 
-# WLS filter parameters
-WLS_LAMBDA = 8000   # smoothness strength (higher = smoother)
-WLS_SIGMA  = 1.5    # edge sensitivity (lower = sharper edges preserved)
+# WLS: lambda — сила сглаживания, sigma — чувствительность к краям
+WLS_LAMBDA = 8000
+WLS_SIGMA  = 1.5
 
+# CLAHE — адаптивная эквализация гистограммы (улучшает контраст локально)
 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
 
 def load_calib():
+    """Загружаем карты ректификации и матрицу проекции из файла калибровки."""
     d = np.load(CALIB_FILE)
     return d["map1_l"], d["map2_l"], d["map1_r"], d["map2_r"], d["P1"]
 
 
 def depth_colormap(depth_m, max_depth=5.0):
+    """
+    Переводим метрическую глубину в цветную карту JET:
+    красный = близко, синий = далеко. Обрезаем по max_depth метров.
+    """
     depth_clipped = np.clip(depth_m, 0, max_depth)
     norm = (depth_clipped / max_depth * 255).astype(np.uint8)
     return cv2.applyColorMap(norm, cv2.COLORMAP_JET)
@@ -52,25 +61,26 @@ def main():
         return
 
     map1_l, map2_l, map1_r, map2_r, P1_mat = load_calib()
-    focal = float(P1_mat[0, 0])
+    focal = float(P1_mat[0, 0])  # фокусное расстояние в пикселях
     print(f"Focal: {focal:.1f} px  Baseline: {BASELINE} m")
 
-    # Left matcher
+    # Левый матчер ищет диспаритет слева направо
     matcher_left = cv2.StereoSGBM_create(
         minDisparity=0,
         numDisparities=NUM_DISPARITIES,
         blockSize=BLOCK_SIZE,
         P1=P1, P2=P2,
-        disp12MaxDiff=1,
-        uniquenessRatio=10,
-        speckleWindowSize=100,
+        disp12MaxDiff=1,        # максимальная разница при перекрёстной проверке
+        uniquenessRatio=10,     # фильтр неоднозначных совпадений
+        speckleWindowSize=100,  # размер окна фильтрации артефактов
         speckleRange=2,
         mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY,
     )
-    # Right matcher (mirror of left — needed for WLS)
+    # Правый матчер — зеркальный, нужен для WLS-фильтра (проверка согласованности)
     matcher_right = cv2.ximgproc.createRightMatcher(matcher_left)
 
-    # WLS filter
+    # WLS-фильтр: сглаживает диспаритет там где текстура слабая,
+    # но сохраняет чёткие края
     wls = cv2.ximgproc.createDisparityWLSFilter(matcher_left)
     wls.setLambda(WLS_LAMBDA)
     wls.setSigmaColor(WLS_SIGMA)
@@ -89,39 +99,45 @@ def main():
         img_l = cv2.imread(str(pl))
         img_r = cv2.imread(str(pr))
 
-        # Rectify
+        # Ректификация: убираем дисторсию и выравниваем строки по вертикали
+        # После ректификации одинаковые точки сцены лежат на одной горизонтали
         rect_l = cv2.remap(img_l, map1_l, map2_l, cv2.INTER_LINEAR)
         rect_r = cv2.remap(img_r, map1_r, map2_r, cv2.INTER_LINEAR)
 
-        # CLAHE on grayscale before matching
+        # CLAHE улучшает поиск соответствий в тёмных и засвеченных областях
         gray_l = clahe.apply(cv2.cvtColor(rect_l, cv2.COLOR_BGR2GRAY))
         gray_r = clahe.apply(cv2.cvtColor(rect_r, cv2.COLOR_BGR2GRAY))
 
-        # Compute both disparities
+        # Вычисляем диспаритет в обоих направлениях
         disp_left  = matcher_left.compute(gray_l, gray_r)
         disp_right = matcher_right.compute(gray_r, gray_l)
 
-        # WLS filter (uses right disparity for consistency check)
+        # WLS объединяет оба диспаритета для лучшего результата
         disp_filtered = wls.filter(disp_left, rect_l, None, disp_right)
 
-        # Fixed-point → float
+        # SGBM возвращает фиксированную точку (×16) → переводим во float
         disp_f = disp_filtered.astype(np.float32) / 16.0
 
-        # Depth Z = f * B / d
+        # Формула глубины: Z = f * B / d
+        # Где d ≤ 1 — невалидный пиксель (нет совпадения), ставим 0
         with np.errstate(divide="ignore", invalid="ignore"):
             depth = np.where(disp_f > 1.0, focal * BASELINE / disp_f, 0)
 
         color = depth_colormap(depth)
         stem = pl.stem
         cv2.imwrite(str(OUT_DIR / f"{stem}_depth.png"), color)
-        np.save(str(OUT_DIR / f"{stem}_depth_raw.npy"), depth)
+        np.save(str(OUT_DIR / f"{stem}_depth_raw.npy"), depth)  # сырые данные для шага 5
 
     print(f"Done. Saved to: {OUT_DIR.resolve()}")
     temporal_smooth()
 
 
 def temporal_smooth():
-    """Second pass: EMA over consecutive depth maps to reduce frame-to-frame jumps."""
+    """
+    Второй проход: экспоненциальное сглаживание между соседними кадрами.
+    Убирает мерцание карты глубины от кадра к кадру.
+    EMA: smoothed[t] = alpha * depth[t] + (1-alpha) * smoothed[t-1]
+    """
     raw_files = sorted(OUT_DIR.glob("*_depth_raw.npy"))
     if not raw_files:
         return
@@ -133,14 +149,14 @@ def temporal_smooth():
         if prev is None:
             smoothed = depth
         else:
-            # Blend: only where both frames have valid depth
+            # Смешиваем только там где оба кадра имеют валидную глубину
             valid = (depth > 0) & (prev > 0)
             smoothed = np.where(valid,
                                 EMA_ALPHA * depth + (1 - EMA_ALPHA) * prev,
                                 depth)
         prev = smoothed
 
-        # Overwrite colourised PNG with smoothed version
+        # Перезаписываем цветную PNG сглаженной версией
         color_path = str(path).replace("_depth_raw.npy", "_depth.png")
         cv2.imwrite(color_path, depth_colormap(smoothed))
 
